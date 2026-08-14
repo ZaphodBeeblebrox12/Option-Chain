@@ -6,7 +6,15 @@ import { TrendingUp, TrendingDown, Activity, Radio, Clock, Target } from 'lucide
 import { motion } from 'framer-motion'
 
 export default function MarketHeader() {
-  const { spotPrice, futuresPrice, spotSource, futuresSource, expiryDate, messageCount, connectionStatus, optionData } = useMarketStore()
+  // FIX: Use individual selectors to prevent re-render on every tick
+  const spotPrice = useMarketStore((s) => s.spotPrice)
+  const futuresPrice = useMarketStore((s) => s.futuresPrice)
+  const spotSource = useMarketStore((s) => s.spotSource)
+  const futuresSource = useMarketStore((s) => s.futuresSource)
+  const expiryDate = useMarketStore((s) => s.expiryDate)
+  const messageCount = useMarketStore((s) => s.messageCount)
+  const connectionStatus = useMarketStore((s) => s.connectionStatus)
+  const optionData = useMarketStore((s) => s.optionData)
 
   const spotRef = useGSAPNumberRoll(spotPrice, 2)
   const futuresRef = useGSAPNumberRoll(futuresPrice, 2)

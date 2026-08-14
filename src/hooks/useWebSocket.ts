@@ -4,6 +4,7 @@ import { generateMockData, generateNextTick } from '@/data/mockGenerator'
 import type { OptionData } from '@/types/market'
 
 const BRIDGE_URL = 'ws://localhost:8765'
+const BATCH_MS = 200  // Batch option updates into 200ms windows
 
 export function useWebSocket() {
   const [isLive, setIsLive] = useState(false)
@@ -13,6 +14,10 @@ export function useWebSocket() {
   const currentDataRef = useRef<Record<number, OptionData>>({})
   const storeRef = useRef(useMarketStore.getState())
 
+  // FIX: Batch option updates to prevent React overload during live market
+  const pendingUpdatesRef = useRef<Record<number, OptionData>>({})
+  const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   // Keep store ref up to date without causing re-renders
   useEffect(() => {
     const unsub = useMarketStore.subscribe((state) => {
@@ -20,6 +25,55 @@ export function useWebSocket() {
     })
     return unsub
   }, [])
+
+  const flushBatch = useCallback(() => {
+    if (batchTimerRef.current) {
+      clearTimeout(batchTimerRef.current)
+      batchTimerRef.current = null
+    }
+    const pending = pendingUpdatesRef.current
+    if (Object.keys(pending).length === 0) return
+
+    // Merge pending updates into current data
+    Object.entries(pending).forEach(([strikeStr, data]) => {
+      currentDataRef.current[parseInt(strikeStr)] = data
+    })
+    pendingUpdatesRef.current = {}
+
+    const store = storeRef.current
+    store.updateOptionData(Object.values(currentDataRef.current).sort((a, b) => a.strike - b.strike))
+  }, [])
+
+  const queueOptionUpdate = useCallback((strike: number, optionType: 'CE' | 'PE', ltp: number, oi: number, volume: number) => {
+    const existing = currentDataRef.current[strike] || {
+      strike,
+      ce: { ltp: 0, oi: 0, volume: 0, change: 0, prevOi: 0 },
+      pe: { ltp: 0, oi: 0, volume: 0, change: 0, prevOi: 0 },
+      lastUpdate: Date.now(),
+    }
+
+    const side = optionType === 'CE' ? 'ce' : 'pe'
+    const oldOi = existing[side].oi
+    const updated = {
+      ...existing,
+      [side]: {
+        ltp,
+        oi,
+        volume,
+        prevOi: oldOi,
+        change: oi - oldOi,
+      },
+      lastUpdate: Date.now(),
+    }
+
+    pendingUpdatesRef.current[strike] = updated
+
+    if (!batchTimerRef.current) {
+      batchTimerRef.current = setTimeout(() => {
+        flushBatch()
+      }, BATCH_MS)
+    }
+  }, [flushBatch])
 
   const stopMock = useCallback(() => {
     if (mockIntervalRef.current) {
@@ -76,6 +130,7 @@ export function useWebSocket() {
           store.incrementMessageCount()
 
           if (msg.type === 'snapshot') {
+            flushBatch() // Flush any pending before snapshot
             if (msg.spotPrice) store.updateSpot(msg.spotPrice, msg.spotSource || 'BRIDGE')
             if (msg.futuresPrice) store.updateFutures(msg.futuresPrice, msg.futuresSource || 'BRIDGE')
             if (msg.expiryDate) store.setExpiryDate(msg.expiryDate)
@@ -104,28 +159,8 @@ export function useWebSocket() {
             store.updateFutures(msg.price, msg.source)
           }
           else if (msg.type === 'option') {
-            const existing = currentDataRef.current[msg.strike]
-            if (!existing) {
-              currentDataRef.current[msg.strike] = {
-                strike: msg.strike,
-                ce: { ltp: 0, oi: 0, volume: 0, change: 0, prevOi: 0 },
-                pe: { ltp: 0, oi: 0, volume: 0, change: 0, prevOi: 0 },
-                lastUpdate: Date.now(),
-              }
-            }
-            const updated = { ...currentDataRef.current[msg.strike] }
-            const side = msg.optionType === 'CE' ? 'ce' : 'pe'
-            const oldOi = updated[side].oi
-            updated[side] = {
-              ltp: msg.ltp,
-              oi: msg.oi,
-              volume: msg.volume,
-              prevOi: oldOi,
-              change: msg.oi - oldOi,
-            }
-            updated.lastUpdate = Date.now()
-            currentDataRef.current[msg.strike] = updated
-            store.updateOptionData(Object.values(currentDataRef.current).sort((a, b) => a.strike - b.strike))
+            // FIX: Batch option updates instead of immediate store push
+            queueOptionUpdate(msg.strike, msg.optionType, msg.ltp, msg.oi, msg.volume)
           }
         } catch (e) {
           console.error('[Bridge] Parse error:', e)
@@ -139,6 +174,7 @@ export function useWebSocket() {
 
       ws.onclose = () => {
         console.log('[Bridge] Disconnected')
+        flushBatch()
         storeRef.current.setConnectionStatus('disconnected')
         wsRef.current = null
         setIsLive(false)
@@ -148,27 +184,24 @@ export function useWebSocket() {
     } catch (e) {
       console.error('[Bridge] Connection failed:', e)
     }
-  }, [startMock, stopMock])
+  }, [startMock, stopMock, flushBatch, queueOptionUpdate])
 
   useEffect(() => {
     console.log('[App] Mounting useWebSocket hook')
-
-    // Start mock immediately
     startMock()
-
-    // Try bridge after 1s
     const t = setTimeout(() => connectBridge(), 1000)
 
     return () => {
       console.log('[App] Unmounting useWebSocket hook')
       clearTimeout(t)
+      flushBatch()
       if (wsRef.current) {
         wsRef.current.close()
         wsRef.current = null
       }
       stopMock()
     }
-  }, [startMock, stopMock, connectBridge])
+  }, [startMock, stopMock, connectBridge, flushBatch])
 
   return { isLive, ready }
 }

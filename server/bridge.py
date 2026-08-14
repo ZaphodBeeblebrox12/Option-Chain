@@ -291,6 +291,7 @@ class AngelOneBridge:
         self.futures_info: Optional[Dict] = None
         self.running = True
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self._reconnecting = False  # FIX: prevent double reconnect
 
     def setup(self, nifty_options, expiry_str, nifty_info, futures_info):
         self.nifty_info = nifty_info
@@ -437,6 +438,10 @@ class AngelOneBridge:
         self._reconnect()
 
     def _reconnect(self):
+        # FIX: prevent _on_error and _on_close both triggering reconnect
+        if self._reconnecting:
+            return
+        self._reconnecting = True
         logger.info("[Bridge] Reconnecting in 5s...")
         time.sleep(5)
         try:
@@ -444,6 +449,8 @@ class AngelOneBridge:
             self._init_websocket()
         except Exception as e:
             logger.error(f"[Bridge] Reconnect failed: {e}")
+        finally:
+            self._reconnecting = False
 
     def stop(self):
         self.running = False

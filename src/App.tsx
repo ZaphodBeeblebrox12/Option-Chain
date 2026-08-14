@@ -5,6 +5,7 @@ import OptionChainTable from '@/components/OptionChainTable'
 import Legend from '@/components/Legend'
 import ConnectionStatus from '@/components/ConnectionStatus'
 import SettingsPanel from '@/components/SettingsPanel'
+import ErrorBoundary from '@/components/ErrorBoundary'
 
 function App() {
   const { isLive } = useWebSocket()
@@ -36,7 +37,9 @@ function App() {
 
       <div className="max-w-7xl mx-auto space-y-1.5">
         <MarketHeader />
-        <OptionChainTable />
+        <ErrorBoundary>
+          <OptionChainTable />
+        </ErrorBoundary>
         <Legend />
       </div>
 

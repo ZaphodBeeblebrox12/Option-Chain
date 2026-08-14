@@ -35,7 +35,17 @@ interface TableRow {
 }
 
 export default function OptionChainTable() {
-  const { optionData, prevOptionData, spotPrice, futuresPrice, settings, selectedStrike, setSelectedStrike, strikeRange, setStrikeRange } = useMarketStore()
+  // FIX: Use individual selectors to prevent re-render on every tick
+  const optionData = useMarketStore((s) => s.optionData)
+  const prevOptionData = useMarketStore((s) => s.prevOptionData)
+  const spotPrice = useMarketStore((s) => s.spotPrice)
+  const futuresPrice = useMarketStore((s) => s.futuresPrice)
+  const settings = useMarketStore((s) => s.settings)
+  const selectedStrike = useMarketStore((s) => s.selectedStrike)
+  const strikeRange = useMarketStore((s) => s.strikeRange)
+  const setSelectedStrike = useMarketStore((s) => s.setSelectedStrike)
+  const setStrikeRange = useMarketStore((s) => s.setStrikeRange)
+
   const tableRef = useRef<HTMLDivElement>(null)
   const atmRowRef = useRef<HTMLTableRowElement>(null)
 
@@ -131,10 +141,7 @@ export default function OptionChainTable() {
     return markers
   }, [atmSpot, atmFutures, ceRanks, peRanks])
 
-  // NEW COLUMN ORDER:
-  // CE: VOL | LTP | OI | Strike | PE: OI | LTP | VOL
   const columns = useMemo<ColumnDef<TableRow>[]>(() => [
-    // ========== CE SIDE (left of strike) ==========
     {
       id: 'ceVolume',
       header: () => <div className="text-center text-red-400/50 font-bold text-[10px] uppercase tracking-wider">VOL</div>,
@@ -162,7 +169,6 @@ export default function OptionChainTable() {
       ),
       size: 90,
     },
-    // ========== STRIKE (center) ==========
     {
       id: 'strike',
       header: () => <div className="text-center text-white font-bold text-[10px] uppercase tracking-wider">Strike</div>,
@@ -179,7 +185,6 @@ export default function OptionChainTable() {
       },
       size: 110,
     },
-    // ========== PE SIDE (right of strike) ==========
     {
       id: 'peOi',
       header: () => <div className="text-center text-green-400/80 font-bold text-[10px] uppercase tracking-wider">OI</div>,
