@@ -1,0 +1,19 @@
+# Python bridge dependencies
+# For Windows, run install_windows.bat instead of pip install -r requirements.txt
+# It handles the PyCrypto compilation issue automatically.
+
+# Core bridge deps
+websockets>=12.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+requests>=2.31.0
+pyotp>=2.9.0
+logzero>=1.7.0
+
+# SmartApi + its deps (install pycryptodome first!)
+pycryptodome
+smartapi
+isodate
+pytz
+rdflib
+simplejson
