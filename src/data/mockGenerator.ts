@@ -1,44 +1,47 @@
-import type { OptionData } from '@/types/market'
+import type { Instrument, OptionData } from '@/types/market'
+import { INSTRUMENTS } from '@/lib/utils'
 
-const BASE_SPOT = 22450
-const STRIKES = Array.from({ length: 41 }, (_, i) => 22250 + i * 50)
-
-// Realistic OI distribution: higher near ATM, tapering off
-function generateOI(strike: number, spot: number, side: 'CE' | 'PE', rank: number): number {
-  const distance = Math.abs(strike - spot)
-  const baseOI = 500000 - distance * 2000  // Higher OI near ATM
-  const noise = (Math.random() - 0.5) * 300000
-  const rankBoost = rank === 1 ? 200000 : rank === 2 ? 100000 : rank === 3 ? 50000 : 0
-  return Math.max(50000, Math.floor(baseOI + noise + rankBoost))
+const BASE_PRICES: Record<Instrument, number> = {
+  NIFTY: 22450,
+  BANKNIFTY: 47800,
+  FINNIFTY: 23500,
+  SENSEX: 73800,
+  MIDCPNIFTY: 13200,
 }
 
-function generateInitialOption(strike: number, spot: number, ceRank: number, peRank: number): OptionData {
+function randomWalk(current: number, volatility: number, min: number, max: number): number {
+  const change = (Math.random() - 0.5) * volatility
+  const next = current + change
+  return Math.max(min, Math.min(max, next))
+}
+
+function generateInitialOption(strike: number, spot: number, strikeStep: number): OptionData {
   const distance = Math.abs(strike - spot)
   const isITM = strike < spot
 
   const ceIntrinsic = Math.max(0, spot - strike)
-  const ceTimeValue = Math.max(5, 180 - distance * 0.9 + Math.random() * 25)
-  const ceLtp = Math.max(0.5, ceIntrinsic + ceTimeValue)
-  const ceOI = generateOI(strike, spot, 'CE', ceRank)
+  const ceTimeValue = Math.max(5, 150 - distance * 0.8 + Math.random() * 30)
+  const ceLtp = Math.max(1, ceIntrinsic + ceTimeValue)
+  const ceOI = Math.floor(50000 + Math.random() * 800000)
 
   const peIntrinsic = Math.max(0, strike - spot)
-  const peTimeValue = Math.max(5, 180 - distance * 0.9 + Math.random() * 25)
-  const peLtp = Math.max(0.5, peIntrinsic + peTimeValue)
-  const peOI = generateOI(strike, spot, 'PE', peRank)
+  const peTimeValue = Math.max(5, 150 - distance * 0.8 + Math.random() * 30)
+  const peLtp = Math.max(1, peIntrinsic + peTimeValue)
+  const peOI = Math.floor(50000 + Math.random() * 800000)
 
   return {
     strike,
     ce: {
       ltp: Math.round(ceLtp * 100) / 100,
       oi: ceOI,
-      volume: Math.floor(ceOI * 0.08 + Math.random() * 3000),
+      volume: Math.floor(ceOI * 0.1 + Math.random() * 5000),
       change: 0,
       prevOi: ceOI,
     },
     pe: {
       ltp: Math.round(peLtp * 100) / 100,
       oi: peOI,
-      volume: Math.floor(peOI * 0.08 + Math.random() * 3000),
+      volume: Math.floor(peOI * 0.1 + Math.random() * 5000),
       change: 0,
       prevOi: peOI,
     },
@@ -46,42 +49,37 @@ function generateInitialOption(strike: number, spot: number, ceRank: number, peR
   }
 }
 
-export function generateMockData(): OptionData[] {
-  // Assign ranks: 1st, 2nd, 3rd highest OI at specific strikes
-  const ceRanks: Record<number, number> = {}
-  const peRanks: Record<number, number> = {}
+export function generateMockData(instrument: Instrument = 'NIFTY'): OptionData[] {
+  const config = INSTRUMENTS[instrument]
+  const baseSpot = BASE_PRICES[instrument]
+  const strikeStep = config.strikeStep
+  const numStrikes = 41
+  const startStrike = baseSpot - Math.floor(numStrikes / 2) * strikeStep
 
-  // Pick 3 strikes for CE ranks (near ATM)
-  const ceRankStrikes = [22350, 22450, 22550]
-  ceRankStrikes.forEach((s, i) => ceRanks[s] = i + 1)
-
-  // Pick 3 strikes for PE ranks (near ATM)
-  const peRankStrikes = [22400, 22500, 22600]
-  peRankStrikes.forEach((s, i) => peRanks[s] = i + 1)
-
-  return STRIKES.map((strike) => generateInitialOption(strike, BASE_SPOT, ceRanks[strike] || 0, peRanks[strike] || 0))
+  const strikes = Array.from({ length: numStrikes }, (_, i) => startStrike + i * strikeStep)
+  return strikes.map((strike) => generateInitialOption(strike, baseSpot, strikeStep))
 }
 
-export function generateNextTick(current: OptionData[]): { 
+export function generateNextTick(current: OptionData[], instrument: Instrument = 'NIFTY'): { 
   data: OptionData[] 
   spotPrice: number 
   futuresPrice: number 
 } {
-  const spotNoise = (Math.random() - 0.5) * 6
-  const trend = Math.sin(Date.now() / 20000) * 8
-  const newSpot = BASE_SPOT + spotNoise + trend
-  const newFutures = newSpot + 32 + Math.sin(Date.now() / 35000) * 5
+  const baseSpot = BASE_PRICES[instrument]
+  const spotNoise = (Math.random() - 0.5) * 8
+  const newSpot = baseSpot + spotNoise + Math.sin(Date.now() / 30000) * 15
+  const newFutures = newSpot + 35 + Math.sin(Date.now() / 45000) * 8
 
   const updated = current.map((opt) => {
     const distance = Math.abs(opt.strike - newSpot)
 
-    const ceOiChange = Math.floor((Math.random() - 0.49) * 1200)
-    const ceLtpChange = (Math.random() - 0.5) * (distance < 150 ? 1.8 : 0.5)
-    const ceVolumeChange = Math.floor(Math.random() * 150)
+    const ceOiChange = Math.floor((Math.random() - 0.48) * 1500)
+    const ceLtpChange = (Math.random() - 0.5) * (distance < 100 ? 2.5 : 0.8)
+    const ceVolumeChange = Math.floor(Math.random() * 200)
 
-    const peOiChange = Math.floor((Math.random() - 0.49) * 1200)
-    const peLtpChange = (Math.random() - 0.5) * (distance < 150 ? 1.8 : 0.5)
-    const peVolumeChange = Math.floor(Math.random() * 150)
+    const peOiChange = Math.floor((Math.random() - 0.48) * 1500)
+    const peLtpChange = (Math.random() - 0.5) * (distance < 100 ? 2.5 : 0.8)
+    const peVolumeChange = Math.floor(Math.random() * 200)
 
     return {
       strike: opt.strike,

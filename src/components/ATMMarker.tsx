@@ -1,10 +1,11 @@
 import { motion } from 'framer-motion'
+import { memo } from 'react'
 
 interface ATMMarkerProps {
   markers: string[]
 }
 
-export default function ATMMarker({ markers }: ATMMarkerProps) {
+function ATMMarker({ markers }: ATMMarkerProps) {
   if (markers.length === 0) return null
   return (
     <motion.div
@@ -30,3 +31,8 @@ export default function ATMMarker({ markers }: ATMMarkerProps) {
     </motion.div>
   )
 }
+
+export default memo(ATMMarker, (prev, next) => {
+  if (prev.markers.length !== next.markers.length) return false
+  return prev.markers.every((m, i) => m === next.markers[i])
+})

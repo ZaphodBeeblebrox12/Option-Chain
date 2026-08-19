@@ -6,10 +6,10 @@ export default function ConnectionStatus() {
   const status = useMarketStore((s) => s.connectionStatus)
 
   const config = {
-    connected: { icon: Wifi, color: 'text-green-400', bg: 'bg-green-500/10', text: 'Connected' },
-    connecting: { icon: Loader2, color: 'text-yellow-400', bg: 'bg-yellow-500/10', text: 'Connecting...' },
-    disconnected: { icon: WifiOff, color: 'text-red-400', bg: 'bg-red-500/10', text: 'Disconnected' },
-    error: { icon: WifiOff, color: 'text-red-500', bg: 'bg-red-500/10', text: 'Error' },
+    connected: { icon: Wifi, color: 'text-green-600 dark:text-green-400', bg: 'bg-green-500/10', text: 'Connected' },
+    connecting: { icon: Loader2, color: 'text-yellow-600 dark:text-yellow-400', bg: 'bg-yellow-500/10', text: 'Connecting...' },
+    disconnected: { icon: WifiOff, color: 'text-red-600 dark:text-red-400', bg: 'bg-red-500/10', text: 'Disconnected' },
+    error: { icon: WifiOff, color: 'text-red-700 dark:text-red-500', bg: 'bg-red-500/10', text: 'Error' },
   }
 
   const { icon: Icon, color, bg, text } = config[status]
@@ -21,7 +21,7 @@ export default function ConnectionStatus() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 20 }}
-          className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg border border-white/10 ${bg} backdrop-blur-md`}
+          className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg border border-gray-300 dark:border-white/10 ${bg} backdrop-blur-md bg-white/90 dark:bg-gray-900/90 shadow-lg`}
         >
           <Icon className={`w-5 h-5 ${color} ${status === 'connecting' ? 'animate-spin' : ''}`} />
           <span className={`text-sm font-medium ${color}`}>{text}</span>

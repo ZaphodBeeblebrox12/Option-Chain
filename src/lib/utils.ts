@@ -1,9 +1,57 @@
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import type { OptionData } from '@/types/market'
+import type { Instrument, InstrumentConfig } from '@/types/market'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
+}
+
+export const INSTRUMENTS: Record<Instrument, InstrumentConfig> = {
+  NIFTY: {
+    name: 'NIFTY',
+    displayName: 'NIFTY 50',
+    strikeStep: 50,
+    indexToken: '99926000',
+    exchange: 'NSE',
+    futuresExchange: 'NFO',
+    lotSize: 75,
+  },
+  BANKNIFTY: {
+    name: 'BANKNIFTY',
+    displayName: 'BANK NIFTY',
+    strikeStep: 100,
+    indexToken: '99926009',
+    exchange: 'NSE',
+    futuresExchange: 'NFO',
+    lotSize: 30,
+  },
+  FINNIFTY: {
+    name: 'FINNIFTY',
+    displayName: 'FIN NIFTY',
+    strikeStep: 50,
+    indexToken: '99926037',
+    exchange: 'NSE',
+    futuresExchange: 'NFO',
+    lotSize: 65,
+  },
+  SENSEX: {
+    name: 'SENSEX',
+    displayName: 'SENSEX',
+    strikeStep: 100,
+    indexToken: '99919000',
+    exchange: 'BSE',
+    futuresExchange: 'BFO',
+    lotSize: 20,
+  },
+  MIDCPNIFTY: {
+    name: 'MIDCPNIFTY',
+    displayName: 'MIDCAP NIFTY',
+    strikeStep: 100,
+    indexToken: '99926074',
+    exchange: 'NSE',
+    futuresExchange: 'NFO',
+    lotSize: 120,
+  },
 }
 
 export function formatNumber(num: number, decimals = 0): string {
@@ -27,9 +75,9 @@ export function formatOI(oi: number): string {
   return oi.toString()
 }
 
-export function getATMStrike(price: number | null, allStrikes: number[]): number | null {
+export function getATMStrike(price: number | null, allStrikes: number[], strikeStep: number = 50): number | null {
   if (!price || allStrikes.length === 0) return null
-  const rounded = Math.round(price / 50) * 50
+  const rounded = Math.round(price / strikeStep) * strikeStep
   return allStrikes.reduce((closest, strike) =>
     Math.abs(strike - rounded) < Math.abs(closest - rounded) ? strike : closest
   )
@@ -70,60 +118,29 @@ export function getMaxVolume(data: OptionData[]): number {
   )
 }
 
-// ==========================================
-// MAX PAIN CALCULATION
-// ==========================================
-export interface MaxPainResult {
-  strike: number
-  totalPain: number
-  cePain: number
-  pePain: number
-}
-
-export function calculateMaxPain(data: OptionData[]): MaxPainResult | null {
+export function calculateMaxPain(data: OptionData[]): { strike: number; totalPain: number } | null {
   if (data.length === 0) return null
-
-  const strikes = data.map((d) => d.strike).sort((a, b) => a - b)
   let minPain = Infinity
-  let maxPainStrike = strikes[0]
-  let minCePain = 0
-  let minPePain = 0
+  let maxPainStrike = data[0]?.strike ?? 0
 
-  for (const expiryStrike of strikes) {
-    let totalCePain = 0
-    let totalPePain = 0
-
+  for (const candidate of data) {
+    let totalPain = 0
     for (const opt of data) {
-      // Call pain: if expiryStrike > opt.strike, call writers pay (expiryStrike - strike) * OI
-      if (expiryStrike > opt.strike) {
-        totalCePain += (expiryStrike - opt.strike) * opt.ce.oi
-      }
-      // Put pain: if expiryStrike < opt.strike, put writers pay (strike - expiryStrike) * OI
-      if (expiryStrike < opt.strike) {
-        totalPePain += (opt.strike - expiryStrike) * opt.pe.oi
-      }
+      const cePain = opt.ce.oi * Math.max(0, candidate.strike - opt.strike)
+      const pePain = opt.pe.oi * Math.max(0, opt.strike - candidate.strike)
+      totalPain += cePain + pePain
     }
-
-    const totalPain = totalCePain + totalPePain
     if (totalPain < minPain) {
       minPain = totalPain
-      maxPainStrike = expiryStrike
-      minCePain = totalCePain
-      minPePain = totalPePain
+      maxPainStrike = candidate.strike
     }
   }
-
-  return {
-    strike: maxPainStrike,
-    totalPain: minPain,
-    cePain: minCePain,
-    pePain: minPePain,
-  }
+  return { strike: maxPainStrike, totalPain: minPain }
 }
 
-export function formatMaxPainValue(value: number): string {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-  return value.toString()
+export function formatMaxPainValue(val: number): string {
+  if (val >= 1_000_000_000) return `${(val / 1_000_000_000).toFixed(2)}B`
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`
+  if (val >= 1_000) return `${(val / 1_000).toFixed(0)}K`
+  return val.toString()
 }

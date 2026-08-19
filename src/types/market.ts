@@ -1,3 +1,15 @@
+export type Instrument = 'NIFTY' | 'BANKNIFTY' | 'FINNIFTY' | 'SENSEX' | 'MIDCPNIFTY'
+
+export interface InstrumentConfig {
+  name: Instrument
+  displayName: string
+  strikeStep: number
+  indexToken: string
+  exchange: 'NSE' | 'BSE'
+  futuresExchange: 'NFO' | 'BFO'
+  lotSize: number
+}
+
 export interface OptionData {
   strike: number
   ce: {
@@ -29,6 +41,9 @@ export interface MarketState {
   lastUpdate: number
   messageCount: number
   selectedStrike: number | null
+  instrument: Instrument
+  availableExpiries: string[]
+  selectedExpiry: string
   strikeRange: number
   settings: {
     autoScroll: boolean

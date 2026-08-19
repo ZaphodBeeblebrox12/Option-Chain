@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, memo } from 'react'
 import gsap from 'gsap'
 import { Crosshair } from 'lucide-react'
 
@@ -10,7 +10,7 @@ interface StrikeCellProps {
   onClick: () => void
 }
 
-export default function StrikeCell({ strike, isAtmSpot, isAtmFutures, isSelected, onClick }: StrikeCellProps) {
+function StrikeCell({ strike, isAtmSpot, isAtmFutures, isSelected, onClick }: StrikeCellProps) {
   const cellRef = useRef<HTMLDivElement>(null)
   const iconRef = useRef<HTMLDivElement>(null)
   const isBoth = isAtmSpot && isAtmFutures
@@ -28,8 +28,8 @@ export default function StrikeCell({ strike, isAtmSpot, isAtmFutures, isSelected
     return () => { gsap.killTweensOf(iconRef.current) }
   }, [isBoth])
 
-  let bgClass = 'bg-gray-800/40 hover:bg-gray-700/50'
-  let textClass = 'text-gray-400'
+  let bgClass = 'bg-gray-200 dark:bg-gray-800/40 hover:bg-gray-300 dark:hover:bg-gray-700/50'
+  let textClass = 'text-gray-700 dark:text-gray-400'
   let borderClass = 'border-transparent'
   let shadowClass = ''
 
@@ -51,8 +51,8 @@ export default function StrikeCell({ strike, isAtmSpot, isAtmFutures, isSelected
   }
 
   if (isSelected && !isAtmSpot && !isAtmFutures) {
-    borderClass = 'border-white/20'
-    bgClass = 'bg-white/5'
+    borderClass = 'border-gray-400 dark:border-white/20'
+    bgClass = 'bg-gray-100 dark:bg-white/5'
   }
 
   return (
@@ -68,3 +68,5 @@ export default function StrikeCell({ strike, isAtmSpot, isAtmFutures, isSelected
     </div>
   )
 }
+
+export default memo(StrikeCell)

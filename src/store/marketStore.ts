@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { type OptionData, type MarketState } from '@/types/market'
+import { type OptionData, type MarketState, type Instrument } from '@/types/market'
 
 interface MarketStore extends MarketState {
   updateSpot: (price: number, source: string) => void
@@ -10,10 +10,13 @@ interface MarketStore extends MarketState {
   toggleSetting: (key: keyof MarketState['settings']) => void
   incrementMessageCount: () => void
   setExpiryDate: (date: string) => void
+  setInstrument: (instrument: Instrument) => void
+  setAvailableExpiries: (expiries: string[]) => void
+  setSelectedExpiry: (expiry: string) => void
   setStrikeRange: (range: number) => void
 }
 
-export const useMarketStore = create<MarketStore>((set, get) => ({
+export const useMarketStore = create<MarketStore>((set) => ({
   spotPrice: null,
   futuresPrice: null,
   spotSource: '',
@@ -25,6 +28,9 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   lastUpdate: 0,
   messageCount: 0,
   selectedStrike: null,
+  instrument: 'NIFTY',
+  availableExpiries: [],
+  selectedExpiry: '',
   strikeRange: 10,
   settings: {
     autoScroll: true,
@@ -52,14 +58,39 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   setSelectedStrike: (strike) => set({ selectedStrike: strike }),
 
   toggleSetting: (key) =>
-    set((state) => ({
-      settings: { ...state.settings, [key]: !state.settings[key] },
-    })),
+    set((state) => {
+      const newSettings = { ...state.settings, [key]: !state.settings[key] }
+      // Apply dark mode to document immediately
+      if (key === 'darkMode') {
+        if (newSettings.darkMode) {
+          document.documentElement.classList.add('dark')
+        } else {
+          document.documentElement.classList.remove('dark')
+        }
+      }
+      return { settings: newSettings }
+    }),
 
   incrementMessageCount: () =>
     set((state) => ({ messageCount: state.messageCount + 1 })),
 
   setExpiryDate: (date) => set({ expiryDate: date }),
+
+  setInstrument: (instrument) =>
+    set({
+      instrument,
+      optionData: [],
+      prevOptionData: [],
+      spotPrice: null,
+      futuresPrice: null,
+      messageCount: 0,
+      selectedExpiry: '',
+      availableExpiries: [],
+    }),
+
+  setAvailableExpiries: (expiries) => set({ availableExpiries: expiries }),
+
+  setSelectedExpiry: (expiry) => set({ selectedExpiry: expiry }),
 
   setStrikeRange: (range) => set({ strikeRange: range }),
 }))

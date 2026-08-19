@@ -15,9 +15,8 @@ function App() {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.4 }}
-      className="min-h-screen bg-[#0a0e1a] px-2 py-1"
+      className="min-h-screen bg-gray-100 dark:bg-[#0a0e1a] px-2 py-1"
     >
-      {/* Demo mode banner */}
       {!isLive && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
@@ -27,10 +26,10 @@ function App() {
           <div className="bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-1 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-              <span className="text-amber-400 text-[11px] font-medium">DEMO MODE</span>
-              <span className="text-gray-500 text-[10px]">Market is closed. Showing simulated data for preview.</span>
+              <span className="text-amber-700 dark:text-amber-400 text-[11px] font-medium">DEMO MODE</span>
+              <span className="text-gray-600 dark:text-gray-500 text-[10px]">Market is closed. Showing simulated data for preview.</span>
             </div>
-            <span className="text-gray-600 text-[10px] font-mono">Live data resumes at 09:15 IST</span>
+            <span className="text-gray-500 text-[10px] font-mono">Live data resumes at 09:15 IST</span>
           </div>
         </motion.div>
       )}

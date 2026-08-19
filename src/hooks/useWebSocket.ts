@@ -1,10 +1,11 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useMarketStore } from '@/store/marketStore'
 import { generateMockData, generateNextTick } from '@/data/mockGenerator'
-import type { OptionData } from '@/types/market'
+import { INSTRUMENTS } from '@/lib/utils'
+import type { OptionData, Instrument } from '@/types/market'
 
 const BRIDGE_URL = 'ws://localhost:8765'
-const BATCH_MS = 200  // Batch option updates into 200ms windows
+const BATCH_MS = 200
 
 export function useWebSocket() {
   const [isLive, setIsLive] = useState(false)
@@ -13,15 +14,15 @@ export function useWebSocket() {
   const mockIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const currentDataRef = useRef<Record<number, OptionData>>({})
   const storeRef = useRef(useMarketStore.getState())
-
-  // FIX: Batch option updates to prevent React overload during live market
   const pendingUpdatesRef = useRef<Record<number, OptionData>>({})
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const instrumentRef = useRef<Instrument>('NIFTY')
+  const liveModeRef = useRef(false)  // Prevents mock from overwriting live data
 
-  // Keep store ref up to date without causing re-renders
   useEffect(() => {
     const unsub = useMarketStore.subscribe((state) => {
       storeRef.current = state as any
+      instrumentRef.current = (state as any).instrument
     })
     return unsub
   }, [])
@@ -33,15 +34,11 @@ export function useWebSocket() {
     }
     const pending = pendingUpdatesRef.current
     if (Object.keys(pending).length === 0) return
-
-    // Merge pending updates into current data
     Object.entries(pending).forEach(([strikeStr, data]) => {
       currentDataRef.current[parseInt(strikeStr)] = data
     })
     pendingUpdatesRef.current = {}
-
-    const store = storeRef.current
-    store.updateOptionData(Object.values(currentDataRef.current).sort((a, b) => a.strike - b.strike))
+    storeRef.current.updateOptionData(Object.values(currentDataRef.current).sort((a, b) => a.strike - b.strike))
   }, [])
 
   const queueOptionUpdate = useCallback((strike: number, optionType: 'CE' | 'PE', ltp: number, oi: number, volume: number) => {
@@ -51,27 +48,16 @@ export function useWebSocket() {
       pe: { ltp: 0, oi: 0, volume: 0, change: 0, prevOi: 0 },
       lastUpdate: Date.now(),
     }
-
     const side = optionType === 'CE' ? 'ce' : 'pe'
     const oldOi = existing[side].oi
-    const updated = {
+    currentDataRef.current[strike] = {
       ...existing,
-      [side]: {
-        ltp,
-        oi,
-        volume,
-        prevOi: oldOi,
-        change: oi - oldOi,
-      },
+      [side]: { ltp, oi, volume, prevOi: oldOi, change: oi - oldOi },
       lastUpdate: Date.now(),
     }
-
-    pendingUpdatesRef.current[strike] = updated
-
+    pendingUpdatesRef.current[strike] = currentDataRef.current[strike]
     if (!batchTimerRef.current) {
-      batchTimerRef.current = setTimeout(() => {
-        flushBatch()
-      }, BATCH_MS)
+      batchTimerRef.current = setTimeout(() => flushBatch(), BATCH_MS)
     }
   }, [flushBatch])
 
@@ -79,29 +65,27 @@ export function useWebSocket() {
     if (mockIntervalRef.current) {
       clearInterval(mockIntervalRef.current)
       mockIntervalRef.current = null
-      console.log('[Mock] Stopped')
     }
   }, [])
 
-  const startMock = useCallback(() => {
-    if (mockIntervalRef.current) return
-    console.log('[Mock] Starting...')
-
+  const startMock = useCallback((instrument: Instrument = 'NIFTY') => {
+    if (mockIntervalRef.current) stopMock()
+    console.log('[Mock] Starting for', instrument)
     const store = storeRef.current
     store.setConnectionStatus('connected')
-
-    const initialData = generateMockData()
+    const initialData = generateMockData(instrument)
+    currentDataRef.current = {}
     initialData.forEach((d) => { currentDataRef.current[d.strike] = d })
     store.updateOptionData(initialData)
     store.updateSpot(22450.75, 'MOCK')
     store.updateFutures(22485.30, 'MOCK')
     store.setExpiryDate('18-AUG-2026')
     setReady(true)
-    console.log('[Mock] Data loaded, table should appear')
 
     mockIntervalRef.current = setInterval(() => {
+      if (liveModeRef.current) return  // BLOCK: never overwrite live data
       const store = storeRef.current
-      const next = generateNextTick(Object.values(currentDataRef.current))
+      const next = generateNextTick(Object.values(currentDataRef.current), instrument)
       next.data.forEach((d) => { currentDataRef.current[d.strike] = d })
       store.updateOptionData(next.data)
       if (next.spotPrice) store.updateSpot(next.spotPrice, 'MOCK')
@@ -111,16 +95,30 @@ export function useWebSocket() {
   }, [stopMock])
 
   const connectBridge = useCallback(() => {
-    console.log('[Bridge] Attempting connection to', BRIDGE_URL)
+    if (wsRef.current?.readyState === WebSocket.OPEN) return
     try {
       const ws = new WebSocket(BRIDGE_URL)
       wsRef.current = ws
 
       ws.onopen = () => {
         console.log('[Bridge] Connected!')
+        liveModeRef.current = true
         storeRef.current.setConnectionStatus('connected')
         setIsLive(true)
         stopMock()
+
+        // Clear stale mock futures so UI doesn't show stale [MOCK] forever
+        const store = storeRef.current
+        if (store.futuresSource === 'MOCK') {
+          store.updateFutures(null, '')
+        }
+
+        // Send current instrument to bridge
+        ws.send(JSON.stringify({
+          action: 'subscribe',
+          instrument: store.instrument,
+          expiry: store.selectedExpiry || null,
+        }))
       }
 
       ws.onmessage = (event) => {
@@ -130,11 +128,11 @@ export function useWebSocket() {
           store.incrementMessageCount()
 
           if (msg.type === 'snapshot') {
-            flushBatch() // Flush any pending before snapshot
+            flushBatch()
             if (msg.spotPrice) store.updateSpot(msg.spotPrice, msg.spotSource || 'BRIDGE')
             if (msg.futuresPrice) store.updateFutures(msg.futuresPrice, msg.futuresSource || 'BRIDGE')
             if (msg.expiryDate) store.setExpiryDate(msg.expiryDate)
-
+            if (msg.availableExpiries) store.setAvailableExpiries(msg.availableExpiries)
             const optionData: OptionData[] = Object.entries(msg.optionData || {})
               .map(([strikeStr, data]: [string, any]) => {
                 const strike = parseInt(strikeStr)
@@ -148,37 +146,28 @@ export function useWebSocket() {
                 }
               })
               .sort((a, b) => a.strike - b.strike)
-
             optionData.forEach((d) => { currentDataRef.current[d.strike] = d })
             store.updateOptionData(optionData)
           }
-          else if (msg.type === 'spot') {
-            store.updateSpot(msg.price, msg.source)
-          }
-          else if (msg.type === 'futures') {
-            store.updateFutures(msg.price, msg.source)
-          }
-          else if (msg.type === 'option') {
-            // FIX: Batch option updates instead of immediate store push
-            queueOptionUpdate(msg.strike, msg.optionType, msg.ltp, msg.oi, msg.volume)
-          }
+          else if (msg.type === 'spot') store.updateSpot(msg.price, msg.source)
+          else if (msg.type === 'futures') store.updateFutures(msg.price, msg.source)
+          else if (msg.type === 'option') queueOptionUpdate(msg.strike, msg.optionType, msg.ltp, msg.oi, msg.volume)
         } catch (e) {
           console.error('[Bridge] Parse error:', e)
         }
       }
 
-      ws.onerror = (error) => {
-        console.error('[Bridge] Error:', error)
+      ws.onerror = () => {
         storeRef.current.setConnectionStatus('error')
       }
 
       ws.onclose = () => {
-        console.log('[Bridge] Disconnected')
         flushBatch()
+        liveModeRef.current = false
         storeRef.current.setConnectionStatus('disconnected')
         wsRef.current = null
         setIsLive(false)
-        startMock()
+        startMock(instrumentRef.current)
         setTimeout(() => connectBridge(), 5000)
       }
     } catch (e) {
@@ -186,19 +175,38 @@ export function useWebSocket() {
     }
   }, [startMock, stopMock, flushBatch, queueOptionUpdate])
 
+  // Watch for instrument changes
   useEffect(() => {
-    console.log('[App] Mounting useWebSocket hook')
-    startMock()
-    const t = setTimeout(() => connectBridge(), 1000)
+    const unsub = useMarketStore.subscribe((state: any, prevState: any) => {
+      if (state.instrument !== prevState.instrument || state.selectedExpiry !== prevState.selectedExpiry) {
+        console.log('[WebSocket] Instrument/expiry changed:', state.instrument, state.selectedExpiry)
+        // Clear current data
+        currentDataRef.current = {}
+        pendingUpdatesRef.current = {}
+        flushBatch()
+        // Restart mock with new instrument
+        stopMock()
+        startMock(state.instrument)
+        // Notify bridge if connected
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            action: 'subscribe',
+            instrument: state.instrument,
+            expiry: state.selectedExpiry || null,
+          }))
+        }
+      }
+    })
+    return unsub
+  }, [startMock, stopMock, flushBatch])
 
+  useEffect(() => {
+    startMock('NIFTY')
+    const t = setTimeout(() => connectBridge(), 1000)
     return () => {
-      console.log('[App] Unmounting useWebSocket hook')
       clearTimeout(t)
       flushBatch()
-      if (wsRef.current) {
-        wsRef.current.close()
-        wsRef.current = null
-      }
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
       stopMock()
     }
   }, [startMock, stopMock, connectBridge, flushBatch])
