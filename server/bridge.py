@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 NIFTY Option Chain WebSocket Bridge
-Reuses your .env + Angel One SmartAPI connection.
-Broadcasts clean JSON to all connected web clients.
+Multi-instrument support: NIFTY, BANKNIFTY, FINNIFTY, SENSEX, MIDCPNIFTY
+Expiry selection support
 
 Usage:
     cd server && python bridge.py
-    # Then in another terminal: npm run dev
 """
 
 import os
@@ -16,7 +15,7 @@ import asyncio
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Set, Dict, Any, Optional
+from typing import Set, Dict, Any, Optional, List
 
 import requests
 import pandas as pd
@@ -24,9 +23,6 @@ import pyotp
 from dotenv import load_dotenv
 from logzero import logger
 
-# ------------------------------------------------------------------
-# 0. Load .env (same as your terminal script)
-# ------------------------------------------------------------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(script_dir, '..', '.env')
 load_dotenv(env_path, override=True)
@@ -38,12 +34,8 @@ TOTP_SECRET = os.getenv("TOTP_SECRET", "").strip()
 
 if not all([API_KEY, CLIENT_CODE, PASSWORD, TOTP_SECRET]):
     print("ERROR: Missing credentials in .env")
-    print(f"Looking at: {env_path}  (exists={os.path.exists(env_path)})")
     sys.exit(1)
 
-# ------------------------------------------------------------------
-# 1. Angel One Auth (same logic as terminal)
-# ------------------------------------------------------------------
 SCRIP_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 
 try:
@@ -51,10 +43,52 @@ try:
     from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 except ImportError as e:
     logger.error(f"SmartApi not installed: {e}")
-    logger.error("Run: pip install smartapi-python")
     sys.exit(1)
 
+# ------------------------------------------------------------------
+# Instrument Configs
+# ------------------------------------------------------------------
+INSTRUMENT_CONFIGS = {
+    'NIFTY': {
+        'name': 'NIFTY',
+        'index_token': '99926000',
+        'exchange': 'NSE',
+        'futures_exchange': 'NFO',
+        'strike_step': 50,
+    },
+    'BANKNIFTY': {
+        'name': 'BANKNIFTY',
+        'index_token': '99926009',
+        'exchange': 'NSE',
+        'futures_exchange': 'NFO',
+        'strike_step': 100,
+    },
+    'FINNIFTY': {
+        'name': 'FINNIFTY',
+        'index_token': '99926037',
+        'exchange': 'NSE',
+        'futures_exchange': 'NFO',
+        'strike_step': 50,
+    },
+    'SENSEX': {
+        'name': 'SENSEX',
+        'index_token': '99919000',
+        'exchange': 'BSE',
+        'futures_exchange': 'BFO',
+        'strike_step': 100,
+    },
+    'MIDCPNIFTY': {
+        'name': 'MIDCPNIFTY',
+        'index_token': '99926074',
+        'exchange': 'NSE',
+        'futures_exchange': 'NFO',
+        'strike_step': 100,
+    },
+}
 
+# ------------------------------------------------------------------
+# Auth Manager
+# ------------------------------------------------------------------
 class AuthManager:
     def __init__(self):
         self.smart_api = SmartConnect(API_KEY)
@@ -101,90 +135,110 @@ class AuthManager:
 
 
 # ------------------------------------------------------------------
-# 2. Scrip Master + Expiry Logic (same as terminal)
+# Scrip Master + Multi-Instrument Support
 # ------------------------------------------------------------------
-def get_next_tuesday():
-    today = datetime.now()
-    days_ahead = (1 - today.weekday() + 7) % 7
-    if days_ahead == 0:
-        if today.hour >= 15 and today.minute >= 30:
-            days_ahead = 7
-    next_tue = today + timedelta(days=days_ahead)
-    return next_tue, next_tue.strftime('%d-%b-%Y').upper()
+_scrip_master_df: Optional[pd.DataFrame] = None
+_scrip_master_loaded_at: float = 0
 
-
-def fetch_option_chain():
+def get_scrip_master() -> pd.DataFrame:
+    global _scrip_master_df, _scrip_master_loaded_at
+    if _scrip_master_df is not None and time.time() - _scrip_master_loaded_at < 3600:
+        return _scrip_master_df
     try:
         response = requests.get(SCRIP_MASTER_URL, timeout=15)
         response.raise_for_status()
-        df = pd.DataFrame(response.json())
+        _scrip_master_df = pd.DataFrame(response.json())
+        _scrip_master_loaded_at = time.time()
+        logger.info(f"[Bridge] Scrip master loaded: {len(_scrip_master_df)} rows")
+        return _scrip_master_df
     except Exception as e:
         logger.error(f"[Bridge] Failed to fetch scrip master: {e}")
         raise
 
-    # NIFTY Index
-    nifty_filter = (
-        (df['name'].str.strip().str.upper() == 'NIFTY') &
-        (df['exch_seg'] == 'NSE') &
-        (df['instrumenttype'].isin(['AMXIDX', 'IDX', '']))
-    )
-    nifty_df = df[nifty_filter]
-    if len(nifty_df) == 0:
-        raise ValueError("NIFTY index not found in scrip master")
-    nifty_index = nifty_df.iloc[0]
-    nifty_info = {
-        'token': str(nifty_index['token']),
-        'symbol': str(nifty_index['symbol']),
-        'name': str(nifty_index['name']),
-    }
 
-    # Current Month Future
+def get_instrument_info(df: pd.DataFrame, instrument: str):
+    """Get index and futures info for any instrument."""
+    cfg = INSTRUMENT_CONFIGS[instrument]
+
+    # Index
+    idx_filter = (
+        (df['name'].str.strip().str.upper() == instrument) &
+        (df['exch_seg'] == cfg['exchange']) &
+        (df['instrumenttype'].str.strip().isin(['AMXIDX', 'IDX', '']))
+    )
+    idx_df = df[idx_filter]
+    if len(idx_df) == 0:
+        raise ValueError(f"{instrument} index not found")
+    idx = idx_df.iloc[0]
+    index_info = {'token': str(idx['token']), 'symbol': str(idx['symbol']), 'name': str(idx['name'])}
+
+    # Futures
     fut_filter = (
-        (df['name'].str.strip().str.upper() == 'NIFTY') &
-        (df['exch_seg'] == 'NFO') &
-        (df['instrumenttype'] == 'FUTIDX')
+        (df['name'].str.strip().str.upper() == instrument) &
+        (df['exch_seg'] == cfg['futures_exchange']) &
+        (df['instrumenttype'].str.strip() == 'FUTIDX')
     )
     fut_df = df[fut_filter].copy()
     futures_info = None
     if len(fut_df) > 0:
         fut_df['expiry_dt'] = pd.to_datetime(fut_df['expiry'], format='%d%b%Y')
         fut_df = fut_df.sort_values('expiry_dt')
-        futures_index = fut_df.iloc[0]
-        futures_info = {
-            'token': str(futures_index['token']),
-            'symbol': str(futures_index['symbol']),
-            'expiry': str(futures_index['expiry']),
-        }
+        f = fut_df.iloc[0]
+        futures_info = {'token': str(f['token']), 'symbol': str(f['symbol']), 'expiry': str(f['expiry'])}
 
-    # Options for next Tuesday
-    optidx_df = df[
-        (df['instrumenttype'] == 'OPTIDX') &
-        (df['exch_seg'] == 'NFO')
-    ]
-    next_tue, expiry_str = get_next_tuesday()
-    symbol_pattern = f"NIFTY{next_tue.strftime('%d%b%y').upper()}"
+    return index_info, futures_info
 
-    nifty_options = optidx_df[
-        optidx_df['symbol'].str.startswith(symbol_pattern, na=False)
-    ].copy()
 
-    if len(nifty_options) == 0:
-        logger.warning(f"[Bridge] No options for pattern: {symbol_pattern}")
-        sample = optidx_df[optidx_df['symbol'].str.startswith('NIFTY', na=False)]['symbol'].unique()[:10]
-        logger.warning(f"[Bridge] Sample symbols: {list(sample)}")
+def get_available_expiries(df: pd.DataFrame, instrument: str) -> List[str]:
+    """Get all available weekly/monthly expiries for an instrument."""
+    cfg = INSTRUMENT_CONFIGS[instrument]
+    opt_filter = (
+        (df['instrumenttype'].str.strip() == 'OPTIDX') &
+        (df['exch_seg'] == cfg['futures_exchange']) &
+        (df['name'].str.strip().str.upper() == instrument)
+    )
+    opt_df = df[opt_filter].copy()
+    if len(opt_df) == 0:
+        return []
+    opt_df['expiry_dt'] = pd.to_datetime(opt_df['expiry'], format='%d%b%Y')
+    opt_df = opt_df.sort_values('expiry_dt')
+    expiries = opt_df['expiry'].unique().tolist()
+    return [str(e) for e in expiries]
 
-    nifty_options['strike'] = nifty_options['strike'].astype(float) / 100
-    nifty_options['strike'] = nifty_options['strike'].astype(int)
-    nifty_options['expiry'] = pd.to_datetime(
-        nifty_options['expiry'], format='%d%b%Y'
-    ).dt.strftime('%d-%b-%Y')
 
-    logger.info(f"[Bridge] Loaded {len(nifty_options)} contracts for {expiry_str}")
-    return nifty_options, expiry_str, nifty_info, futures_info
+def get_options_for_expiry(df: pd.DataFrame, instrument: str, expiry: str):
+    """Get option contracts for a specific expiry date."""
+    cfg = INSTRUMENT_CONFIGS[instrument]
+    opt_filter = (
+        (df['instrumenttype'].str.strip() == 'OPTIDX') &
+        (df['exch_seg'] == cfg['futures_exchange']) &
+        (df['name'].str.strip().str.upper() == instrument) &
+        (df['expiry'] == expiry)
+    )
+    options = df[opt_filter].copy()
+    if len(options) == 0:
+        return None
+    options['strike'] = options['strike'].astype(float) / 100
+    options['strike'] = options['strike'].astype(int)
+    options['expiry'] = pd.to_datetime(options['expiry'], format='%d%b%Y').dt.strftime('%d-%b-%Y')
+    return options
+
+
+def get_next_tuesday_expiry(expiries: List[str]) -> str:
+    """Find the next Tuesday expiry from available expiries."""
+    today = datetime.now()
+    for exp in sorted(expiries):
+        try:
+            exp_dt = datetime.strptime(exp, '%d%b%Y')
+            if exp_dt >= today:
+                return exp
+        except:
+            continue
+    return expiries[0] if expiries else ''
 
 
 # ------------------------------------------------------------------
-# 3. WebSocket Broadcast Server
+# Broadcast Server
 # ------------------------------------------------------------------
 class BroadcastServer:
     def __init__(self, host='localhost', port=8765):
@@ -199,6 +253,7 @@ class BroadcastServer:
         self.spot_source: str = ""
         self.futures_source: str = ""
         self.expiry_date: str = ""
+        self.available_expiries: List[str] = []
         self.message_count = 0
 
     async def register(self, websocket):
@@ -213,7 +268,6 @@ class BroadcastServer:
             logger.info(f"[Bridge] Client disconnected. Total: {len(self.clients)}")
 
     def broadcast_sync(self, message: dict, loop: asyncio.AbstractEventLoop):
-        """Thread-safe broadcast from any thread."""
         asyncio.run_coroutine_threadsafe(self._broadcast(message), loop)
 
     async def _broadcast(self, message: dict):
@@ -230,7 +284,6 @@ class BroadcastServer:
             self.clients -= dead
 
     async def _send_snapshot(self, websocket):
-        """Send current state to a newly connected client."""
         with self.data_lock:
             snapshot = {
                 "type": "snapshot",
@@ -239,6 +292,7 @@ class BroadcastServer:
                 "spotSource": self.spot_source,
                 "futuresSource": self.futures_source,
                 "expiryDate": self.expiry_date,
+                "availableExpiries": self.available_expiries,
                 "optionData": self.option_data,
                 "messageCount": self.message_count,
             }
@@ -253,23 +307,30 @@ class BroadcastServer:
                 self.option_data[strike] = {"CE": {}, "PE": {}}
             old = self.option_data[strike].get(option_type, {})
             self.option_data[strike][option_type] = {
-                "ltp": ltp,
-                "oi": oi,
-                "volume": volume,
+                "ltp": ltp, "oi": oi, "volume": volume,
                 "prevOi": old.get("oi", oi),
                 "change": oi - old.get("oi", oi),
                 "lastUpdate": time.time(),
             }
 
-    # FIX: websockets 17.x passes only (websocket), not (websocket, path)
     async def handler(self, websocket):
         await self.register(websocket)
         try:
             async for message in websocket:
                 try:
                     data = json.loads(message)
-                    if data.get("action") == "ping":
+                    action = data.get("action")
+                    if action == "ping":
                         await websocket.send(json.dumps({"type": "pong"}))
+                    elif action == "subscribe":
+                        instrument = data.get("instrument", "NIFTY")
+                        expiry = data.get("expiry")
+                        logger.info(f"[Bridge] Client requested: {instrument} / {expiry}")
+                        await websocket.send(json.dumps({
+                            "type": "ack",
+                            "instrument": instrument,
+                            "expiry": expiry,
+                        }))
                 except Exception:
                     pass
         except Exception as e:
@@ -279,7 +340,7 @@ class BroadcastServer:
 
 
 # ------------------------------------------------------------------
-# 4. Angel One WebSocket Integration (Thread-Safe)
+# Angel One Bridge (Multi-Instrument)
 # ------------------------------------------------------------------
 class AngelOneBridge:
     def __init__(self, broadcast_server: BroadcastServer):
@@ -287,23 +348,72 @@ class AngelOneBridge:
         self.auth_manager = AuthManager()
         self.sws = None
         self.token_map: Dict[str, Dict[str, Any]] = {}
-        self.nifty_info: Optional[Dict] = None
+        self.index_info: Optional[Dict] = None
         self.futures_info: Optional[Dict] = None
         self.running = True
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self._reconnecting = False  # FIX: prevent double reconnect
+        self._reconnecting = False
+        self.current_instrument = 'NIFTY'
+        self.current_expiry = ''
+        self.scrip_df = None
 
-    def setup(self, nifty_options, expiry_str, nifty_info, futures_info):
-        self.nifty_info = nifty_info
-        self.futures_info = futures_info
-        self.server.expiry_date = expiry_str
+    def setup(self, instrument: str = 'NIFTY', expiry: Optional[str] = None):
+        self.current_instrument = instrument
+        self.scrip_df = get_scrip_master()
+
+        cfg = INSTRUMENT_CONFIGS[instrument]
+        self.index_info = {
+            'token': cfg['index_token'],
+            'symbol': instrument,
+            'name': instrument,
+        }
+
+        # Get futures info
+        try:
+            _, futures_info = get_instrument_info(self.scrip_df, instrument)
+            self.futures_info = futures_info
+        except Exception as e:
+            logger.warning(f"[Bridge] No futures for {instrument}: {e}")
+            self.futures_info = None
+
+        # Log futures status
+        if self.futures_info:
+            logger.info(f"[Bridge] Futures found: {self.futures_info['symbol']} token={self.futures_info['token']}")
+        else:
+            logger.warning(f"[Bridge] No futures contract found for {instrument}")
+
+        # Get available expiries
+        self.server.available_expiries = get_available_expiries(self.scrip_df, instrument)
+        logger.info(f"[Bridge] Available expiries for {instrument}: {self.server.available_expiries}")
+
+        # Determine expiry
+        if expiry and expiry in self.server.available_expiries:
+            self.current_expiry = expiry
+        else:
+            self.current_expiry = get_next_tuesday_expiry(self.server.available_expiries)
+
+        if not self.current_expiry:
+            logger.error(f"[Bridge] No expiry found for {instrument}")
+            return False
+
+        self.server.expiry_date = self.current_expiry
+        logger.info(f"[Bridge] Using expiry: {self.current_expiry}")
+
+        # Build token map for options
+        options = get_options_for_expiry(self.scrip_df, instrument, self.current_expiry)
+        if options is None or len(options) == 0:
+            logger.error(f"[Bridge] No options for {instrument} {self.current_expiry}")
+            return False
+
         self.token_map = {}
-        for _, row in nifty_options.iterrows():
+        for _, row in options.iterrows():
             self.token_map[str(row['token'])] = {
                 'strike': int(row['strike']),
                 'type': 'CE' if 'CE' in row['symbol'] else 'PE',
             }
-        logger.info(f"[Bridge] Token map: {len(self.token_map)} options")
+
+        logger.info(f"[Bridge] {instrument}: {len(self.token_map)} options for {self.current_expiry}")
+        return True
 
     def start(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
@@ -340,32 +450,36 @@ class AngelOneBridge:
 
     def _on_open(self, wsapp):
         logger.info("[Bridge] WebSocket Connected [OK]")
+        cfg = INSTRUMENT_CONFIGS[self.current_instrument]
 
-        # Subscribe NIFTY index
+        # Subscribe index
         try:
+            exch_type = 1 if cfg['exchange'] == 'NSE' else 13  # BSE = 13
             self.sws.subscribe("index_spot", 1, [{
-                "exchangeType": 1,
-                "tokens": [self.nifty_info['token']]
+                "exchangeType": exch_type,
+                "tokens": [self.index_info['token']]
             }])
-            logger.info(f"[Bridge] Subscribed NIFTY index {self.nifty_info['token']}")
+            logger.info(f"[Bridge] Subscribed {self.current_instrument} index {self.index_info['token']} on {cfg['exchange']}")
         except Exception as e:
             logger.error(f"[Bridge] Index sub error: {e}")
 
         # Subscribe futures
         if self.futures_info:
             try:
+                fut_exch = 2 if cfg['futures_exchange'] == 'NFO' else 12  # BFO = 12
                 self.sws.subscribe("futures_ltp", 1, [{
-                    "exchangeType": 2,
+                    "exchangeType": fut_exch,
                     "tokens": [self.futures_info['token']]
                 }])
                 logger.info(f"[Bridge] Subscribed futures {self.futures_info['token']}")
             except Exception as e:
                 logger.error(f"[Bridge] Futures sub error: {e}")
 
-        # Subscribe options in batches
+        # Subscribe options
         tokens = list(self.token_map.keys())
+        opt_exch = 2 if cfg['futures_exchange'] == 'NFO' else 12
         for i in range(0, len(tokens), 50):
-            chunk = [{"exchangeType": 2, "tokens": tokens[i:i+50]}]
+            chunk = [{"exchangeType": opt_exch, "tokens": tokens[i:i+50]}]
             try:
                 self.sws.subscribe("oi_stream", 3, chunk)
                 logger.info(f"[Bridge] Subscribed batch {i//50 + 1}: {len(chunk[0]['tokens'])} tokens")
@@ -375,18 +489,15 @@ class AngelOneBridge:
     def _on_data(self, wsapp, message):
         try:
             token = str(message.get('token', ''))
+            cfg = INSTRUMENT_CONFIGS[self.current_instrument]
 
             # Spot update
-            if token == self.nifty_info['token']:
+            if token == self.index_info['token']:
                 ltp = float(message.get('last_traded_price', 0) or 0) / 100.0
                 self.server.spot_price = ltp
                 self.server.spot_source = "WS"
                 self.server.message_count += 1
-                self.server.broadcast_sync({
-                    "type": "spot",
-                    "price": ltp,
-                    "source": "WS"
-                }, self.loop)
+                self.server.broadcast_sync({"type": "spot", "price": ltp, "source": "WS"}, self.loop)
                 return
 
             # Futures update
@@ -395,11 +506,7 @@ class AngelOneBridge:
                 self.server.futures_price = ltp
                 self.server.futures_source = "WS"
                 self.server.message_count += 1
-                self.server.broadcast_sync({
-                    "type": "futures",
-                    "price": ltp,
-                    "source": "WS"
-                }, self.loop)
+                self.server.broadcast_sync({"type": "futures", "price": ltp, "source": "WS"}, self.loop)
                 return
 
             # Option update
@@ -416,7 +523,6 @@ class AngelOneBridge:
 
             self.server.update_option(strike, option_type, ltp, oi, volume)
             self.server.message_count += 1
-
             self.server.broadcast_sync({
                 "type": "option",
                 "strike": strike,
@@ -438,7 +544,6 @@ class AngelOneBridge:
         self._reconnect()
 
     def _reconnect(self):
-        # FIX: prevent _on_error and _on_close both triggering reconnect
         if self._reconnecting:
             return
         self._reconnecting = True
@@ -462,42 +567,32 @@ class AngelOneBridge:
 
 
 # ------------------------------------------------------------------
-# 5. Main Entry Point
+# Main
 # ------------------------------------------------------------------
 async def main():
     loop = asyncio.get_running_loop()
 
-    # Start broadcast server
     server = BroadcastServer(host='localhost', port=8765)
     import websockets
     ws_server = await websockets.serve(server.handler, server.host, server.port)
     logger.info(f"[Bridge] WebSocket server started on ws://{server.host}:{server.port}")
 
-    # Fetch option chain
-    try:
-        options_df, expiry_str, nifty_info, futures_info = fetch_option_chain()
-        logger.info(f"[Bridge] Expiry: {expiry_str}")
-        logger.info(f"[Bridge] NIFTY Spot Token: {nifty_info['token']}")
-        if futures_info:
-            logger.info(f"[Bridge] NIFTY Fut Token: {futures_info['token']}")
-    except Exception as e:
-        logger.error(f"[Bridge] Setup failed: {e}")
+    bridge = AngelOneBridge(server)
+
+    # Default to NIFTY
+    if not bridge.setup('NIFTY'):
+        logger.error("[Bridge] Setup failed")
         ws_server.close()
         return
-
-    # Start Angel One connection in background thread
-    bridge = AngelOneBridge(server)
-    bridge.setup(options_df, expiry_str, nifty_info, futures_info)
 
     angel_thread = threading.Thread(target=bridge.start, args=(loop,), daemon=True)
     angel_thread.start()
 
-    logger.info("[Bridge] Angel One connection started in background")
     logger.info("[Bridge] Ready for web clients. Press Ctrl+C to stop.")
     logger.info("[Bridge] NOTE: Market is closed after 15:30 IST. No live ticks until next session.")
 
     try:
-        await asyncio.Future()  # Run forever
+        await asyncio.Future()
     except KeyboardInterrupt:
         logger.info("[Bridge] Shutting down...")
     finally:
